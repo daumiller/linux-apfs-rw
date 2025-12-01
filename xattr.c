@@ -5,8 +5,13 @@
 
 #include <linux/buffer_head.h>
 #include <linux/xattr.h>
+#include <linux/vmalloc.h>
 #include <linux/blk_types.h>
 #include "apfs.h"
+
+/* Custom xattr namespace for APFS filesystem */
+#define XATTR_APFS_PREFIX "apfs."
+#define XATTR_APFS_PREFIX_LEN (sizeof(XATTR_APFS_PREFIX) - 1)
 
 /**
  * apfs_xattr_from_query - Read the xattr record found by a successful query
@@ -390,11 +395,11 @@ static int apfs_xattr_get(struct inode *inode, const char *name, void *buffer, s
 	return ret;
 }
 
-static int apfs_xattr_osx_get(const struct xattr_handler *handler,
+static int apfs_xattr_apfs_get(const struct xattr_handler *handler,
 				struct dentry *unused, struct inode *inode,
 				const char *name, void *buffer, size_t size)
 {
-	/* Ignore the fake 'osx' prefix */
+	/* Ignore the 'apfs' namespace prefix */
 	return apfs_xattr_get(inode, name, buffer, size);
 }
 
@@ -801,16 +806,16 @@ done:
 }
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 12, 0)
-static int apfs_xattr_osx_set(const struct xattr_handler *handler,
+static int apfs_xattr_apfs_set(const struct xattr_handler *handler,
 	      struct dentry *unused, struct inode *inode, const char *name,
 	      const void *value, size_t size, int flags)
 #elif LINUX_VERSION_CODE < KERNEL_VERSION(6, 3, 0) && !RHEL_VERSION_GE(9, 6)
-static int apfs_xattr_osx_set(const struct xattr_handler *handler,
+static int apfs_xattr_apfs_set(const struct xattr_handler *handler,
 		  struct user_namespace *mnt_userns, struct dentry *unused,
 		  struct inode *inode, const char *name, const void *value,
 		  size_t size, int flags)
 #else
-static int apfs_xattr_osx_set(const struct xattr_handler *handler,
+static int apfs_xattr_apfs_set(const struct xattr_handler *handler,
 		  struct mnt_idmap *idmap, struct dentry *unused,
 		  struct inode *inode, const char *name, const void *value,
 		  size_t size, int flags)
@@ -823,7 +828,7 @@ static int apfs_xattr_osx_set(const struct xattr_handler *handler,
 	if (err)
 		return err;
 
-	/* Ignore the fake 'osx' prefix */
+	/* Ignore the 'apfs' namespace prefix */
 	err = apfs_xattr_set(inode, name, value, size, flags);
 	if (err)
 		goto fail;
@@ -837,15 +842,15 @@ fail:
 	return err;
 }
 
-static const struct xattr_handler apfs_xattr_osx_handler = {
-	.prefix	= XATTR_MAC_OSX_PREFIX,
-	.get	= apfs_xattr_osx_get,
-	.set	= apfs_xattr_osx_set,
+static const struct xattr_handler apfs_xattr_apfs_handler = {
+	.prefix	= XATTR_APFS_PREFIX,
+	.get	= apfs_xattr_apfs_get,
+	.set	= apfs_xattr_apfs_set,
 };
 
-/* On-disk xattrs have no namespace; use a fake 'osx' prefix in the kernel */
+/* APFS xattrs are stored without a namespace prefix on-disk */
 const struct xattr_handler *apfs_xattr_handlers[] = {
-	&apfs_xattr_osx_handler,
+	&apfs_xattr_apfs_handler,
 	NULL
 };
 
@@ -892,19 +897,19 @@ ssize_t apfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
 		}
 
 		if (buffer) {
-			/* Prepend the fake 'osx' prefix before listing */
-			if (xattr.name_len + XATTR_MAC_OSX_PREFIX_LEN + 1 >
+			/* Prepend the 'apfs' namespace prefix before listing */
+			if (xattr.name_len + XATTR_APFS_PREFIX_LEN + 1 >
 									free) {
 				ret = -ERANGE;
 				break;
 			}
-			memcpy(buffer, XATTR_MAC_OSX_PREFIX,
-			       XATTR_MAC_OSX_PREFIX_LEN);
-			buffer += XATTR_MAC_OSX_PREFIX_LEN;
+			memcpy(buffer, XATTR_APFS_PREFIX,
+			       XATTR_APFS_PREFIX_LEN);
+			buffer += XATTR_APFS_PREFIX_LEN;
 			memcpy(buffer, xattr.name, xattr.name_len + 1);
 			buffer += xattr.name_len + 1;
 		}
-		free -= xattr.name_len + XATTR_MAC_OSX_PREFIX_LEN + 1;
+		free -= xattr.name_len + XATTR_APFS_PREFIX_LEN + 1;
 	}
 
 fail:
@@ -912,3 +917,397 @@ fail:
 	up_read(&nxi->nx_big_sem);
 	return ret;
 }
+
+/*
+ * IOCTL handlers for large xattr operations. These allow userspace to list,
+ * read, write and remove xattrs without the VFS 64KiB limits.
+ */
+int apfs_ioc_xattr_list(struct file *file, void __user *argp)
+{
+	struct apfs_ioctl_xattr_list uarg;
+	struct inode *inode = file_inode(file);
+	struct super_block *sb = inode->i_sb;
+	struct apfs_sb_info *sbi = APFS_SB(sb);
+	struct apfs_nxsb_info *nxi = APFS_NXI(sb);
+	struct apfs_query *query = NULL;
+	struct apfs_xattr xattr;
+	size_t buflen;
+	char *kbuf = NULL;
+	size_t written = 0;
+	ssize_t ret = 0;
+
+	if (copy_from_user(&uarg, argp, sizeof(uarg)))
+		return -EFAULT;
+	buflen = uarg.buf_len;
+
+	/* Enforce maximum list size */
+	if (buflen > APFS_XATTR_MAX_LIST_SIZE)
+		return -EOVERFLOW;
+
+	if (buflen) {
+		kbuf = kmalloc(buflen, GFP_KERNEL);
+		if (!kbuf)
+			return -ENOMEM;
+	}
+
+	down_read(&nxi->nx_big_sem);
+
+	query = apfs_alloc_query(sbi->s_cat_root, NULL);
+	if (!query) {
+		ret = -ENOMEM;
+		goto out_unlock;
+	}
+	apfs_init_xattr_key(apfs_ino(inode), NULL, &query->key);
+	query->flags = APFS_QUERY_CAT | APFS_QUERY_MULTIPLE | APFS_QUERY_EXACT;
+
+	while (1) {
+		int r = apfs_btree_query(sb, &query);
+		if (r == -ENODATA) {
+			ret = written; /* total bytes placed (or required) */
+			break;
+		}
+		if (r) {
+			ret = r;
+			break;
+		}
+		r = apfs_xattr_from_query(query, &xattr);
+		if (r) {
+			ret = r;
+			break;
+		}
+
+		/* Each entry: prefix + name + NUL */
+		size_t entry_len = xattr.name_len + XATTR_APFS_PREFIX_LEN + 1;
+		written += entry_len;
+
+		/* Check if list would exceed maximum size */
+		if (written > APFS_XATTR_MAX_LIST_SIZE) {
+			ret = -EOVERFLOW;
+			break;
+		}
+
+		if (kbuf) {
+			/* Only copy entries that fit in the provided kernel buffer */
+			size_t have = written - entry_len; /* bytes already consumed */
+			if (have + entry_len > buflen) {
+				/* no space: report required size via return value */
+				;
+			} else {
+				memcpy(kbuf + have, XATTR_APFS_PREFIX, XATTR_APFS_PREFIX_LEN);
+				memcpy(kbuf + have + XATTR_APFS_PREFIX_LEN, xattr.name, xattr.name_len + 1);
+			}
+		}
+	}
+
+	if (kbuf && written > 0) {
+		size_t tocopy = min((size_t)written, buflen);
+		if (copy_to_user(uarg.buf, kbuf, tocopy))
+			ret = -EFAULT;
+	}
+
+out_unlock:
+	apfs_free_query(query);
+	up_read(&nxi->nx_big_sem);
+	kfree(kbuf);
+	return ret;
+}
+
+int apfs_ioc_xattr_get(struct file *file, void __user *argp)
+{
+	struct apfs_ioctl_xattr_rw uarg;
+	struct inode *inode = file_inode(file);
+	struct super_block *sb = inode->i_sb;
+	struct apfs_nxsb_info *nxi = APFS_NXI(sb);
+	char *name = NULL;
+	ssize_t ret = 0;
+	struct apfs_compressed_data cdata = {0};
+
+	if (copy_from_user(&uarg, argp, sizeof(uarg)))
+		return -EFAULT;
+	if (!uarg.name || uarg.name_len == 0)
+		return -EINVAL;
+
+	name = kmalloc(uarg.name_len + 1, GFP_KERNEL);
+	if (!name)
+		return -ENOMEM;
+	if (copy_from_user(name, uarg.name, uarg.name_len)) {
+		ret = -EFAULT;
+		goto out;
+	}
+	name[uarg.name_len] = '\0';
+
+	down_read(&nxi->nx_big_sem);
+	ret = apfs_xattr_get_compressed_data(inode, name, &cdata);
+	up_read(&nxi->nx_big_sem);
+	if (ret)
+		goto out;
+
+	/* Report full size to caller via return value, but copy up to provided buffer */
+	u64 full_size = cdata.size;
+
+	/* Enforce maximum attribute size */
+	if (full_size > APFS_XATTR_MAX_SIZE) {
+		ret = -EOVERFLOW;
+		goto out_release;
+	}
+
+	u64 want = uarg.value_len;
+	size_t chunk = PAGE_SIZE;
+	void *kbuf = NULL;
+
+	if (want) {
+		kbuf = kmalloc(chunk, GFP_KERNEL);
+		if (!kbuf) {
+			ret = -ENOMEM;
+			goto out_release;
+		}
+	}
+
+	/* Read in chunks and copy to user buffer */
+	if (cdata.has_dstream) {
+		u64 off = 0;
+		u64 copied = 0;
+		while (off < full_size && copied < want) {
+			size_t toread = min((u64)chunk, min(full_size - off, want - copied));
+			int r = apfs_compressed_data_read(&cdata, kbuf, toread, off);
+			if (r) {
+				ret = r;
+				goto out_free_kbuf;
+			}
+			if (copy_to_user(uarg.value + copied, kbuf, toread)) {
+				ret = -EFAULT;
+				goto out_free_kbuf;
+			}
+			off += toread;
+			copied += toread;
+		}
+	} else {
+		/* Inline data */
+		u64 tocopy = min(full_size, want);
+		if (tocopy) {
+			if (copy_to_user(uarg.value, cdata.data, tocopy)) {
+				ret = -EFAULT;
+				goto out_free_kbuf;
+			}
+		}
+	}
+
+	ret = (ssize_t)full_size;
+
+out_free_kbuf:
+	kfree(kbuf);
+out_release:
+	apfs_release_compressed_data(&cdata);
+out:
+	kfree(name);
+	return ret;
+}
+
+int apfs_ioc_xattr_set(struct file *file, void __user *argp)
+{
+	struct apfs_ioctl_xattr_rw uarg;
+	struct inode *inode = file_inode(file);
+	struct super_block *sb = inode->i_sb;
+	char *name = NULL;
+	void *kbuf = NULL;
+	int err = 0;
+
+	if (copy_from_user(&uarg, argp, sizeof(uarg)))
+		return -EFAULT;
+	if (!uarg.name || uarg.name_len == 0)
+		return -EINVAL;
+
+	/* Enforce maximum attribute size */
+	if (uarg.value_len > APFS_XATTR_MAX_SIZE)
+		return -EOVERFLOW;
+
+	name = kmalloc(uarg.name_len + 1, GFP_KERNEL);
+	if (!name)
+		return -ENOMEM;
+	if (copy_from_user(name, uarg.name, uarg.name_len)) {
+		err = -EFAULT;
+		goto out;
+	}
+	name[uarg.name_len] = '\0';
+
+	/* Enforce VFS-style write permission: require MAY_WRITE on the inode */
+	{
+		int __perm_ret = inode_permission(&nop_mnt_idmap, inode, MAY_WRITE);
+		if (__perm_ret) {
+			err = __perm_ret;
+			goto out;
+		}
+	}
+
+	if (uarg.value_len) {
+		/* For potentially large values, use vmalloc if kmalloc fails */
+		if (uarg.value_len <= (u32)PAGE_SIZE * 16)
+			kbuf = kmalloc(uarg.value_len, GFP_KERNEL);
+		else
+			kbuf = vmalloc(uarg.value_len);
+		if (!kbuf) {
+			err = -ENOMEM;
+			goto out;
+		}
+		if (copy_from_user(kbuf, uarg.value, uarg.value_len)) {
+			err = -EFAULT;
+			goto out_free;
+		}
+	}
+
+	if (sb->s_flags & SB_RDONLY) {
+		err = -EROFS;
+		goto out_free;
+	}
+
+	err = apfs_transaction_start(sb, APFS_TRANS_REG);
+	if (err)
+		goto out_free;
+
+	err = apfs_xattr_set(inode, name, kbuf, uarg.value_len, uarg.flags);
+	if (err)
+		apfs_transaction_abort(sb);
+	else
+		err = apfs_transaction_commit(sb);
+
+out_free:
+	if (uarg.value_len) {
+		if (uarg.value_len <= (u32)PAGE_SIZE * 16)
+			kfree(kbuf);
+		else
+			vfree(kbuf);
+	}
+out:
+	kfree(name);
+	return err;
+}
+
+int apfs_ioc_xattr_remove(struct file *file, void __user *argp)
+{
+	struct apfs_ioctl_xattr_rw uarg;
+	struct inode *inode = file_inode(file);
+	struct super_block *sb = inode->i_sb;
+	char *name = NULL;
+	int err = 0;
+
+	if (copy_from_user(&uarg, argp, sizeof(uarg)))
+		return -EFAULT;
+	if (!uarg.name || uarg.name_len == 0)
+		return -EINVAL;
+
+	name = kmalloc(uarg.name_len + 1, GFP_KERNEL);
+	if (!name)
+		return -ENOMEM;
+	if (copy_from_user(name, uarg.name, uarg.name_len)) {
+		err = -EFAULT;
+		goto out;
+	}
+	name[uarg.name_len] = '\0';
+
+	/* Enforce VFS-style write permission: require MAY_WRITE on the inode */
+	{
+		int __perm_ret = inode_permission(&nop_mnt_idmap, inode, MAY_WRITE);
+		if (__perm_ret) {
+			err = __perm_ret;
+			goto out;
+		}
+	}
+
+	if (sb->s_flags & SB_RDONLY) {
+		err = -EROFS;
+		goto out;
+	}
+
+	err = apfs_transaction_start(sb, APFS_TRANS_DEL);
+	if (err)
+		goto out;
+
+	/* Passing value == NULL signals deletion to apfs_xattr_set */
+	err = apfs_xattr_set(inode, name, NULL, 0, 0);
+	if (err)
+		apfs_transaction_abort(sb);
+	else
+		err = apfs_transaction_commit(sb);
+
+out:
+	kfree(name);
+	return err;
+}
+
+int apfs_ioc_xattr_info(struct file *file, void __user *argp)
+{
+	struct apfs_ioctl_xattr_info uarg;
+	struct inode *inode = file_inode(file);
+	struct super_block *sb = inode->i_sb;
+	struct apfs_sb_info *sbi = APFS_SB(sb);
+	struct apfs_nxsb_info *nxi = APFS_NXI(sb);
+	struct apfs_query *query = NULL;
+	struct apfs_xattr xattr;
+	uint64_t total_value_size = 0;
+	uint64_t total_list_size = 0;
+	uint32_t count = 0;
+	int ret = 0;
+
+	if (copy_from_user(&uarg, argp, sizeof(uarg)))
+		return -EFAULT;
+
+	down_read(&nxi->nx_big_sem);
+
+	query = apfs_alloc_query(sbi->s_cat_root, NULL);
+	if (!query) {
+		ret = -ENOMEM;
+		goto out_unlock;
+	}
+
+	apfs_init_xattr_key(apfs_ino(inode), NULL, &query->key);
+	query->flags = APFS_QUERY_CAT | APFS_QUERY_MULTIPLE | APFS_QUERY_EXACT;
+
+	while (1) {
+		int r = apfs_btree_query(sb, &query);
+		if (r == -ENODATA) {
+			/* Got all the xattrs */
+			break;
+		}
+		if (r) {
+			ret = r;
+			break;
+		}
+
+		r = apfs_xattr_from_query(query, &xattr);
+		if (r) {
+			ret = r;
+			break;
+		}
+
+		/* Accumulate sizes */
+		/* Value size: inline xattrs use xdata_len; dstream xattrs store
+		 * the real size in the embedded dstream header. Use that for
+		 * dstream-backed attributes.
+		 */
+		if (xattr.has_dstream) {
+			struct apfs_xattr_dstream *xdata = (void *)xattr.xdata;
+			total_value_size += le64_to_cpu(xdata->dstream.size);
+		} else {
+			total_value_size += xattr.xdata_len;
+		}
+		total_list_size += xattr.name_len + XATTR_APFS_PREFIX_LEN + 1;
+		count++;
+	}
+
+	apfs_free_query(query);
+out_unlock:
+	up_read(&nxi->nx_big_sem);
+
+	if (ret == 0) {
+		/* Success: fill in and copy result to user */
+		uarg.total_value_size = total_value_size;
+		uarg.total_list_size = total_list_size;
+		uarg.count = count;
+
+		if (copy_to_user(argp, &uarg, sizeof(uarg)))
+			return -EFAULT;
+	}
+
+	return ret;
+}
+

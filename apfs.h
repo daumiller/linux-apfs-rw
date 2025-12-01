@@ -64,7 +64,8 @@ struct apfs_ioctl_snap_name {
 #define APFS_IOC_GET_PFK	_IOR('@', 0x84, struct apfs_wrapped_crypto_state)
 #define APFS_IOC_TAKE_SNAPSHOT	_IOW('@', 0x85, struct apfs_ioctl_snap_name)
 
-/*
+/* Extended attribute IOCTLs - use shared header for userspace/kernel ABI */
+#include "apfs_xattr_ioctl.h"/*
  * In-memory representation of an APFS object
  */
 struct apfs_object {
@@ -1166,6 +1167,12 @@ extern ssize_t apfs_listxattr(struct dentry *dentry, char *buffer, size_t size);
 extern int apfs_xattr_get_compressed_data(struct inode *inode, const char *name, struct apfs_compressed_data *cdata);
 extern void apfs_release_compressed_data(struct apfs_compressed_data *cdata);
 extern int apfs_compressed_data_read(struct apfs_compressed_data *cdata, void *buf, size_t count, u64 offset);
+/* IOCTL helpers for xattrs */
+extern int apfs_ioc_xattr_list(struct file *file, void __user *argp);
+extern int apfs_ioc_xattr_get(struct file *file, void __user *argp);
+extern int apfs_ioc_xattr_set(struct file *file, void __user *argp);
+extern int apfs_ioc_xattr_remove(struct file *file, void __user *argp);
+extern int apfs_ioc_xattr_info(struct file *file, void __user *argp);
 
 /* xfield.c */
 extern int apfs_find_xfield(u8 *xfields, int len, u8 xtype, char **xval);

@@ -2566,6 +2566,16 @@ long apfs_dir_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return apfs_ioc_get_class(file, argp);
 	case APFS_IOC_TAKE_SNAPSHOT:
 		return apfs_ioc_take_snapshot(file, argp);
+	case APFS_IOC_XATTR_LIST:
+		return apfs_ioc_xattr_list(file, argp);
+	case APFS_IOC_XATTR_GET:
+		return apfs_ioc_xattr_get(file, argp);
+	case APFS_IOC_XATTR_SET:
+		return apfs_ioc_xattr_set(file, argp);
+	case APFS_IOC_XATTR_REMOVE:
+		return apfs_ioc_xattr_remove(file, argp);
+	case APFS_IOC_XATTR_INFO:
+		return apfs_ioc_xattr_info(file, argp);
 	default:
 		return -ENOTTY;
 	}
@@ -2588,6 +2598,16 @@ long apfs_file_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return apfs_ioc_get_class(file, argp);
 	case APFS_IOC_GET_PFK:
 		return apfs_ioc_get_pfk(file, argp);
+	case APFS_IOC_XATTR_LIST:
+		return apfs_ioc_xattr_list(file, argp);
+	case APFS_IOC_XATTR_GET:
+		return apfs_ioc_xattr_get(file, argp);
+	case APFS_IOC_XATTR_SET:
+		return apfs_ioc_xattr_set(file, argp);
+	case APFS_IOC_XATTR_REMOVE:
+		return apfs_ioc_xattr_remove(file, argp);
+	case APFS_IOC_XATTR_INFO:
+		return apfs_ioc_xattr_info(file, argp);
 	default:
 		return -ENOTTY;
 	}
