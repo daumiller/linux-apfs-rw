@@ -25,16 +25,15 @@
  *
  * Input: apfs_ioctl_xattr_list with buf_len = 0 to query required size,
  *        or buf_len > 0 to copy list into buffer.
- * Return: Total size needed for all attribute names (sum of prefix + name + NUL),
+ * Return: Total size needed for all attribute names (sum of name + NUL),
  *         or negative error code.
  *
- * The returned list is a sequence of NUL-terminated names, each prefixed with
- * the namespace prefix (typically "apfs." for APFS extended attributes).
- * Format: [prefix\0name\0] [prefix\0name\0] ... repeated for each attribute.
+ * The returned list is a sequence of NUL-terminated names.
+ * Format: [name\0] [name\0] ... repeated for each attribute.
  */
 struct apfs_ioctl_xattr_list {
 	uint32_t buf_len;        /* size of user buffer (0 to query required size) */
-	void __user *buf;        /* user pointer to receive list (NUL-terminated concatenated names with prefix) */
+	void __user *buf;        /* user pointer to receive list (NUL-terminated concatenated names) */
 	uint32_t reserved;       /* reserved for future use */
 };
 
@@ -103,14 +102,14 @@ struct apfs_ioctl_xattr_rw {
  *
  * Returns aggregate information about all extended attributes on the target:
  * - total_value_size: sum of all attribute values (bytes)
- * - total_list_size: sum of (prefix + name + NUL) for each attribute
+ * - total_list_size: sum of (name + NUL) for each attribute
  * - count: number of attributes
  *
  * Useful for pre-allocating buffers or checking if any attributes exist.
  */
 struct apfs_ioctl_xattr_info {
 	uint64_t total_value_size;   /* sum of all attribute value sizes */
-	uint64_t total_list_size;    /* sum of (prefix + name + NUL) for each attribute */
+	uint64_t total_list_size;    /* sum of (name + NUL) for each attribute */
 	uint32_t count;              /* number of attributes */
 	uint32_t reserved;           /* reserved for future use */
 };

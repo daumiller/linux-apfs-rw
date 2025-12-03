@@ -898,13 +898,11 @@ ssize_t apfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
 
 		if (buffer) {
 			/* Prepend the 'apfs' namespace prefix before listing */
-			if (xattr.name_len + XATTR_APFS_PREFIX_LEN + 1 >
-									free) {
+			if (xattr.name_len + XATTR_APFS_PREFIX_LEN + 1 > free) {
 				ret = -ERANGE;
 				break;
 			}
-			memcpy(buffer, XATTR_APFS_PREFIX,
-			       XATTR_APFS_PREFIX_LEN);
+			memcpy(buffer, XATTR_APFS_PREFIX, XATTR_APFS_PREFIX_LEN);
 			buffer += XATTR_APFS_PREFIX_LEN;
 			memcpy(buffer, xattr.name, xattr.name_len + 1);
 			buffer += xattr.name_len + 1;
@@ -976,8 +974,8 @@ int apfs_ioc_xattr_list(struct file *file, void __user *argp)
 			break;
 		}
 
-		/* Each entry: prefix + name + NUL */
-		size_t entry_len = xattr.name_len + XATTR_APFS_PREFIX_LEN + 1;
+		/* Each entry: name + NUL (we ignore prefixes for IOCTL xattrs)*/
+		size_t entry_len = xattr.name_len + 1;
 		written += entry_len;
 
 		/* Check if list would exceed maximum size */
@@ -993,8 +991,7 @@ int apfs_ioc_xattr_list(struct file *file, void __user *argp)
 				/* no space: report required size via return value */
 				;
 			} else {
-				memcpy(kbuf + have, XATTR_APFS_PREFIX, XATTR_APFS_PREFIX_LEN);
-				memcpy(kbuf + have + XATTR_APFS_PREFIX_LEN, xattr.name, xattr.name_len + 1);
+				memcpy(kbuf + have, xattr.name, xattr.name_len + 1);
 			}
 		}
 	}
@@ -1290,7 +1287,7 @@ int apfs_ioc_xattr_info(struct file *file, void __user *argp)
 		} else {
 			total_value_size += xattr.xdata_len;
 		}
-		total_list_size += xattr.name_len + XATTR_APFS_PREFIX_LEN + 1;
+		total_list_size += xattr.name_len + 1;
 		count++;
 	}
 

@@ -23,14 +23,12 @@ __BEGIN_DECLS
 /*
  * apfs_setxattr - Set an extended attribute on a file by path
  * @path:  Path to the file (or directory)
- * @name:  Attribute name (prefix like "user.foo" is handled transparently)
+ * @name:  Attribute name
  * @value: Pointer to attribute data
  * @size:  Size of @value in bytes
  * @flags: XATTR_CREATE or XATTR_REPLACE
  *
  * Returns 0 on success, or -1 on error (errno is set).
- *
- * Note: The VFS prefix "user." is handled by the kernel; pass just the name.
  */
 extern int apfs_setxattr(const char *path, const char *name,
                           const void *value, size_t size, int flags)
@@ -133,7 +131,7 @@ extern int apfs_fremovexattr(int fd, const char *name)
  * apfs_xattr_info - Get aggregate xattr metadata for a file
  * @path: Path to the file (or directory)
  * @value_size: Output parameter for total size of all attribute values
- * @list_size: Output parameter for total size of attribute list (prefix + names + NULs)
+ * @list_size: Output parameter for total size of attribute list (names + NULs)
  * @count: Output parameter for number of attributes
  *
  * Returns 0 on success, or -1 on error (errno is set).
